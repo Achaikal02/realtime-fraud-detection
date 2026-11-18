@@ -1,0 +1,18 @@
+# Fase 1: data dan baseline
+pandas>=2.2
+pyarrow>=15
+numpy>=1.26
+matplotlib>=3.8
+scikit-learn>=1.4
+xgboost>=2.0
+mlflow>=2.12
+jupyter
+
+# Fase 2: infrastruktur real-time
+redis>=5.0
+psycopg[binary]>=3.1
+confluent-kafka>=2.4
+
+# Pengujian
+pytest>=8.0
+fakeredis>=2.20

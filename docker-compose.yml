@@ -1,0 +1,94 @@
+# Infrastruktur Fase 2: Kafka, Redpanda Console, Redis, Postgres (khusus pengembangan lokal; kata sandi di sini bukan untuk produksi).
+#
+#   docker compose up -d        # nyalakan
+#   docker compose ps           # cek status (semua harus "healthy")
+#   docker compose down         # matikan, data tetap tersimpan di volume
+#   docker compose down -v      # matikan DAN hapus semua data
+
+name: fraud-detection
+
+services:
+  # Broker pesan (Apache Kafka, mode KRaft = tanpa ZooKeeper). Transaksi masuk lewat sini.
+  # Catatan: awalnya Redpanda, tetapi image-nya gagal jalan di laptop pengembang
+  # (rpk: "Success" saat exec). API-nya identik, jadi kode Python tidak berubah.
+  kafka:
+    image: apache/kafka:4.0.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller        # satu node berperan ganda (cukup untuk lokal)
+      # INTERNAL = alamat untuk container lain, EXTERNAL = alamat dari laptopmu
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # hanya 1 broker, jadi semua replikasi = 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms512m"         # batasi RAM Java
+    ports:
+      - "19092:19092"   # Kafka API dari laptop
+    # Tanpa volume: isi topic hilang saat container dihapus. Tidak masalah,
+    # karena data PaySim bisa diputar ulang kapan saja. Data permanen ada di Postgres.
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  # Tampilan web untuk melihat topic dan pesan: http://localhost:8080
+  # (buatan Redpanda, tetapi bisa membaca Kafka biasa)
+  console:
+    image: docker.redpanda.com/redpandadata/console:v3.7.3
+    entrypoint: /bin/sh
+    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console'
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["kafka:9092"]
+    ports:
+      - "8080:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # Feature store online. AOF aktif = setiap perubahan dicatat ke disk tiap detik,
+  # jadi kalau Redis mati, data bisa dipulihkan (keputusan Fase 1).
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Penyimpanan permanen: transaksi mentah dan keputusan. Sumber backfill Redis.
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: fraud
+      POSTGRES_PASSWORD: fraud
+      POSTGRES_DB: fraud
+    ports:
+      - "5433:5432"     # 5433 di laptop, supaya tidak bentrok dengan Postgres lain yang mungkin sudah terpasang
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fraud -d fraud"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  redis_data:
+  postgres_data:
